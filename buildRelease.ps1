@@ -20,7 +20,30 @@ if ($PSVersionTable.PSEdition -ne 'Core') {
     Write-Host "Install:      winget install --id Microsoft.PowerShell" -ForegroundColor Yellow
     exit 1
 }
-$msbuild = "C:\Program Files\Microsoft Visual Studio\18\Community\MSBuild\Current\Bin\amd64\MSBuild.exe"
+$vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
+$msbuild = $null
+
+if (Test-Path $vswhere) {
+    $msbuild = & $vswhere -latest -products * -requires Microsoft.Component.MSBuild `
+        -find "MSBuild\Current\Bin\amd64\MSBuild.exe" | Select-Object -First 1
+}
+
+if (-not $msbuild) {
+    $fallbacks = @(
+        "C:\Program Files\Microsoft Visual Studio\18\Community\MSBuild\Current\Bin\amd64\MSBuild.exe",
+        "C:\Program Files\Microsoft Visual Studio\18\Enterprise\MSBuild\Current\Bin\amd64\MSBuild.exe",
+        "C:\Program Files\Microsoft Visual Studio\18\Professional\MSBuild\Current\Bin\amd64\MSBuild.exe",
+        "C:\Program Files\Microsoft Visual Studio\18\BuildTools\MSBuild\Current\Bin\amd64\MSBuild.exe"
+    )
+    $msbuild = $fallbacks | Where-Object { Test-Path $_ } | Select-Object -First 1
+}
+
+if (-not $msbuild) {
+    Write-Host "Visual Studio 2026 MSBuild (x64) was not found." -ForegroundColor Red
+    exit 1
+}
+
+$msbuild = [string]$msbuild
 $solution = Join-Path $PSScriptRoot "JarkViewer.slnx"
 
 $psi = [System.Diagnostics.ProcessStartInfo]::new($msbuild)

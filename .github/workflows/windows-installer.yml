@@ -1,0 +1,186 @@
+name: Build Windows installer
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - build/windows-installer
+    paths:
+      - ".github/workflows/windows-installer.yml"
+      - "packaging/windows/**"
+      - "buildRelease.ps1"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2025
+    timeout-minutes: 90
+
+    env:
+      STATIC_LIB_URL: https://github.com/jark006/JarkViewer/releases/download/static_lib/JarkViewer_static_lib_v2.0%2B.7z
+      STATIC_LIB_SHA256: bbe7ebd841d7446a0d2b02aff0e24ea894bb82cf451a1f90d3025d07af46a718
+      INNO_ZH_URL: https://raw.githubusercontent.com/jrsoftware/issrc/cfdf48923178df4b4f040e038b423aa555a61ffc/Files/Languages/Unofficial/ChineseSimplified.isl
+      INNO_ZH_SHA256: 7d544b9bb1d142cfa11f2e5d3cc8abe2e55f8e066c5124e3772675aa236e1278
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+
+      - name: Download and verify static libraries
+        shell: pwsh
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP "JarkViewer_static_lib_v2.0+.7z"
+          Invoke-WebRequest -Uri $env:STATIC_LIB_URL -OutFile $archive
+          $actualHash = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
+          if ($actualHash -ne $env:STATIC_LIB_SHA256) {
+              throw "Static library checksum mismatch: $actualHash"
+          }
+          7z x $archive "-o$PWD\JarkViewer" -y
+          if ($LASTEXITCODE -ne 0) {
+              throw "Failed to extract static libraries."
+          }
+
+          $requiredDirectories = @("lib", "libavif", "libexiv2", "libffmpeg", "libjxl", "libopencv", "libwebp2")
+          foreach ($directory in $requiredDirectories) {
+              $path = Join-Path "JarkViewer" $directory
+              if (-not (Test-Path $path) -or -not (Get-ChildItem $path -Filter *.lib -Recurse | Select-Object -First 1)) {
+                  throw "Static library directory is missing or empty: $path"
+              }
+          }
+
+      - name: Check source invariants
+        shell: pwsh
+        run: pwsh ./tools/check_source_invariants.ps1
+
+      - name: Build Release x64
+        shell: pwsh
+        run: pwsh ./buildRelease.ps1
+
+      - name: Run headless regression probes
+        shell: pwsh
+        run: |
+          $exe = Resolve-Path "x64\Release\JarkViewer.exe"
+          $probeNames = @(
+              "--cache-test",
+              "--color-test",
+              "--exif-test",
+              "--lang-test",
+              "--navigation-test",
+              "--resample-test",
+              "--sort-test",
+              "--spectrum-test",
+              "--svg-test",
+              "--thumbnail-test"
+          )
+
+          foreach ($probe in $probeNames) {
+              $reportName = $probe.TrimStart('-') + ".txt"
+              $report = Join-Path $env:RUNNER_TEMP $reportName
+              $process = Start-Process -FilePath $exe -ArgumentList @("--probe", $probe, "--out", $report) -Wait -PassThru
+              if (Test-Path $report) {
+                  Get-Content $report
+              }
+              if ($process.ExitCode -ne 0) {
+                  throw "Probe failed: $probe (exit $($process.ExitCode))"
+              }
+          }
+
+      - name: Create installer
+        id: package
+        shell: pwsh
+        run: |
+          $shortCommit = $env:GITHUB_SHA.Substring(0, 8)
+          $outputBase = "JarkViewer-v2.0-$shortCommit-x64-setup"
+          $outputDirectory = Join-Path $PWD "dist"
+          New-Item -ItemType Directory -Force -Path $outputDirectory | Out-Null
+
+          @(
+              "JarkViewer v2.0",
+              "Commit: $env:GITHUB_SHA",
+              "Source: https://github.com/noah-2016/JarkViewer",
+              "Upstream: https://github.com/jark006/JarkViewer",
+              "Built: $([DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ'))",
+              "Platform: Windows x64",
+              "License: GPL-3.0"
+          ) | Set-Content -Encoding utf8 "x64\Release\BUILD-INFO.txt"
+
+          $iscc = (Get-Command ISCC.exe -ErrorAction SilentlyContinue).Source
+          if (-not $iscc) {
+              $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          }
+          if (-not (Test-Path $iscc)) {
+              throw "Inno Setup compiler was not found."
+          }
+
+          $chineseMessages = Join-Path $env:RUNNER_TEMP "ChineseSimplified.isl"
+          Invoke-WebRequest -Uri $env:INNO_ZH_URL -OutFile $chineseMessages
+          $messagesHash = (Get-FileHash -Algorithm SHA256 $chineseMessages).Hash.ToLowerInvariant()
+          if ($messagesHash -ne $env:INNO_ZH_SHA256) {
+              throw "Inno Setup Chinese translation checksum mismatch: $messagesHash"
+          }
+
+          & $iscc "/DMyAppVersion=2.0" "/DMyBuildVersion=2.0.0.0" "/DMyCommit=$shortCommit" "/DMySourceDir=$PWD\x64\Release" "/DMyOutputDir=$outputDirectory" "/DMyOutputBaseFilename=$outputBase" "/DChineseMessagesFile=$chineseMessages" "packaging\windows\JarkViewer.iss"
+          if ($LASTEXITCODE -ne 0) {
+              throw "Inno Setup failed with exit code $LASTEXITCODE."
+          }
+
+          $installer = Join-Path $outputDirectory "$outputBase.exe"
+          if (-not (Test-Path $installer)) {
+              throw "Installer was not created: $installer"
+          }
+
+          $hash = (Get-FileHash -Algorithm SHA256 $installer).Hash.ToLowerInvariant()
+          "$hash  $outputBase.exe" | Set-Content -Encoding ascii (Join-Path $outputDirectory "$outputBase.sha256")
+          "installer=$installer" >> $env:GITHUB_OUTPUT
+          "output_base=$outputBase" >> $env:GITHUB_OUTPUT
+
+      - name: Test silent install and uninstall
+        shell: pwsh
+        run: |
+          $installDirectory = Join-Path $env:RUNNER_TEMP "JarkViewer-install-test"
+          $installer = "${{ steps.package.outputs.installer }}"
+          $install = Start-Process -FilePath $installer -ArgumentList @(
+              "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/DIR=$installDirectory"
+          ) -Wait -PassThru
+          if ($install.ExitCode -ne 0) {
+              throw "Silent installation failed with exit code $($install.ExitCode)."
+          }
+
+          foreach ($file in @("JarkViewer.exe", "JarkThumbnailProvider.dll", "BUILD-INFO.txt", "LICENSE.txt", "unins000.exe")) {
+              if (-not (Test-Path (Join-Path $installDirectory $file))) {
+                  throw "Installed file is missing: $file"
+              }
+          }
+
+          $report = Join-Path $env:RUNNER_TEMP "installed-cache-test.txt"
+          $probe = Start-Process -FilePath (Join-Path $installDirectory "JarkViewer.exe") -ArgumentList @(
+              "--probe", "--cache-test", "--out", $report
+          ) -Wait -PassThru
+          if (Test-Path $report) {
+              Get-Content $report
+          }
+          if ($probe.ExitCode -ne 0) {
+              throw "The installed executable failed its cache probe."
+          }
+
+          $uninstall = Start-Process -FilePath (Join-Path $installDirectory "unins000.exe") -ArgumentList @(
+              "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"
+          ) -Wait -PassThru
+          if ($uninstall.ExitCode -ne 0) {
+              throw "Silent uninstallation failed with exit code $($uninstall.ExitCode)."
+          }
+          if (Test-Path (Join-Path $installDirectory "JarkViewer.exe")) {
+              throw "Uninstall left the application executable behind."
+          }
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.package.outputs.output_base }}
+          path: |
+            dist/${{ steps.package.outputs.output_base }}.exe
+            dist/${{ steps.package.outputs.output_base }}.sha256
+          if-no-files-found: error
+          retention-days: 30
