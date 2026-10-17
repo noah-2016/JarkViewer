@@ -21,10 +21,12 @@ jobs:
     env:
       STATIC_LIB_URL: https://github.com/jark006/JarkViewer/releases/download/static_lib/JarkViewer_static_lib_v2.0%2B.7z
       STATIC_LIB_SHA256: bbe7ebd841d7446a0d2b02aff0e24ea894bb82cf451a1f90d3025d07af46a718
+      INNO_ZH_URL: https://raw.githubusercontent.com/jrsoftware/issrc/cfdf48923178df4b4f040e038b423aa555a61ffc/Files/Languages/Unofficial/ChineseSimplified.isl
+      INNO_ZH_SHA256: 7d544b9bb1d142cfa11f2e5d3cc8abe2e55f8e066c5124e3772675aa236e1278
 
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Download and verify static libraries
         shell: pwsh
@@ -112,7 +114,14 @@ jobs:
               throw "Inno Setup compiler was not found."
           }
 
-          & $iscc "/DMyAppVersion=2.0" "/DMyBuildVersion=2.0.0.0" "/DMyCommit=$shortCommit" "/DMySourceDir=$PWD\x64\Release" "/DMyOutputDir=$outputDirectory" "/DMyOutputBaseFilename=$outputBase" "packaging\windows\JarkViewer.iss"
+          $chineseMessages = Join-Path $env:RUNNER_TEMP "ChineseSimplified.isl"
+          Invoke-WebRequest -Uri $env:INNO_ZH_URL -OutFile $chineseMessages
+          $messagesHash = (Get-FileHash -Algorithm SHA256 $chineseMessages).Hash.ToLowerInvariant()
+          if ($messagesHash -ne $env:INNO_ZH_SHA256) {
+              throw "Inno Setup Chinese translation checksum mismatch: $messagesHash"
+          }
+
+          & $iscc "/DMyAppVersion=2.0" "/DMyBuildVersion=2.0.0.0" "/DMyCommit=$shortCommit" "/DMySourceDir=$PWD\x64\Release" "/DMyOutputDir=$outputDirectory" "/DMyOutputBaseFilename=$outputBase" "/DChineseMessagesFile=$chineseMessages" "packaging\windows\JarkViewer.iss"
           if ($LASTEXITCODE -ne 0) {
               throw "Inno Setup failed with exit code $LASTEXITCODE."
           }

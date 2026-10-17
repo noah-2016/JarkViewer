@@ -16,6 +16,9 @@
 #ifndef MyOutputBaseFilename
   #define MyOutputBaseFilename "JarkViewer-v" + MyAppVersion + "-" + MyCommit + "-x64-setup"
 #endif
+#ifndef ChineseMessagesFile
+  #define ChineseMessagesFile "compiler:Languages\ChineseSimplified.isl"
+#endif
 
 #define MyAppName "JarkViewer"
 #define MyAppExeName "JarkViewer.exe"
@@ -54,7 +57,7 @@ UsePreviousAppDir=yes
 UsePreviousGroup=yes
 
 [Languages]
-Name: "chinesesimplified"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
+Name: "chinesesimplified"; MessagesFile: "{#ChineseMessagesFile}"
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
